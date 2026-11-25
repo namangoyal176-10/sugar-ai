@@ -20,10 +20,17 @@ from contextlib import asynccontextmanager
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
-from typing import AsyncIterator, Callable, Dict, Optional, List
+from typing import AsyncIterator, Callable, Dict, Optional, List, Any
 import app.prompts as prompts
 from app.config import settings
 from app.providers.base import BaseProvider, GenerationParams
+from app.vectorstore import (
+    BaseVectorStore,
+    CollectionNotFoundError,
+    VectorStoreConfigurationError,
+    VectorStoreConnectionError,
+    get_vector_store,
+)
 from starlette.concurrency import run_in_threadpool
 import logging
 
@@ -56,7 +63,8 @@ class RAGAgent:
         self.model_name = provider.get_model_name()
         self._model_change_lock = asyncio.Lock()
         self._provider_users: Dict[int, int] = {}
-        self.retriever: Optional[FAISS] = None
+        self.retriever: Optional[Any] = None
+        self.vector_store: Optional[BaseVectorStore] = None
 
         self.prompt_template = prompts.PROMPT_TEMPLATE
         self.child_prompt_template = prompts.CHILD_FRIENDLY_PROMPT
@@ -149,23 +157,57 @@ class RAGAgent:
                         self._provider_users[id(old_provider)],
                     )
 
-    def setup_vectorstore(self, file_paths: List[str]) -> Optional[FAISS]:
-        """Load documents and create a vector store for retrieval."""
-        all_documents = []
-        for file_path in file_paths:
-            if os.path.exists(file_path):
-                if file_path.endswith(".pdf"):
-                    loader = PyMuPDFLoader(file_path)
-                else:
-                    loader = TextLoader(file_path)
-                documents = loader.load()
-                all_documents.extend(documents)
+    def load_vectorstore(self, backend: Optional[str] = None) -> Optional[Any]:
+        """Connect to an existing persistent vector store collection without rebuilding."""
+        try:
+            vector_store = get_vector_store(backend=backend)
+            self.vector_store = vector_store
+            vector_store.load()
+            self.retriever = vector_store.as_retriever()
+            return self.retriever
+        except CollectionNotFoundError as e:
+            logger.warning(
+                "Persistent vector store collection not found or empty: %s. "
+                "RAG queries will return 'No relevant documentation found'. "
+                "Run 'python -m app.ingest' to index source documents.",
+                e,
+            )
+            self.retriever = None
+            return None
+        except (VectorStoreConnectionError, VectorStoreConfigurationError) as e:
+            logger.error(
+                "Failed to connect to vector store backend: %s. "
+                "RAG queries will return 'No relevant documentation found'.",
+                e,
+            )
+            self.retriever = None
+            return None
+        except Exception as e:
+            logger.error("Unexpected error loading vector store: %s", e)
+            self.retriever = None
+            return None
 
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+    def setup_vectorstore(
+        self,
+        file_paths: List[str],
+        backend: Optional[str] = None,
+    ) -> Optional[Any]:
+        """Load documents and create or update a vector store for retrieval.
+
+        Maintains backward compatibility with existing tests and workflows.
+        """
+        from app.ingest import IngestionEngine
+
+        vector_store = get_vector_store(backend=backend)
+        self.vector_store = vector_store
+
+        engine = IngestionEngine(
+            vector_store=vector_store,
+            chunk_size=getattr(settings, "CHUNK_SIZE", 1000),
+            chunk_overlap=getattr(settings, "CHUNK_OVERLAP", 150),
+            embedding_model_name=getattr(settings, "EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"),
         )
-
-        vector_store = FAISS.from_documents(all_documents, embeddings)
+        engine.sync_documents(file_paths)
         self.retriever = vector_store.as_retriever()
         return self.retriever
 

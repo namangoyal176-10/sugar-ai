@@ -80,7 +80,7 @@ async def startup_event():
     )
 
     initialized_agent = RAGAgent(provider=provider)
-    initialized_agent.retriever = initialized_agent.setup_vectorstore(settings.DOC_PATHS)
+    initialized_agent.load_vectorstore()
 
     # Inject this instance into the API module
     api.agent = initialized_agent
@@ -90,10 +90,16 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Release resources owned by the active provider."""
+    """Release resources owned by the active provider and vector store."""
     active_agent = getattr(app.state, "agent", None)
     if active_agent is None:
         return
+
+    if getattr(active_agent, "vector_store", None) is not None:
+        try:
+            active_agent.vector_store.close()
+        except Exception as error:
+            logger.warning("Failed to close vector store during shutdown: %s", error)
 
     try:
         await active_agent.provider.close()
