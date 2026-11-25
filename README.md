@@ -32,7 +32,7 @@ On Linux or macOS:
 cp .example.env .env
 ```
 
-The template is configured for development mode with the small Hugging Face model `HuggingFaceTB/SmolLM2-135M-Instruct` and the documentation files included in this repository. The first start downloads the language and embedding models and builds the document index, so it can take several minutes.
+The template is configured for development mode with the small Hugging Face model `HuggingFaceTB/SmolLM2-135M-Instruct` and the documentation files included in this repository.
 
 ### 3. Install dependencies
 
@@ -50,7 +50,17 @@ python -m pip install -r requirements/cuda.txt
 
 The CUDA profile requires a compatible NVIDIA driver and installs the CUDA-enabled PyTorch and `bitsandbytes` packages. Do not install both profiles into the same virtual environment; create a fresh environment when switching profiles.
 
-### 4. Start the server
+### 4. Index documentation files
+
+Sugar-AI uses persistent vector storage so retrieval state is preserved across application restarts rather than recomputed on every startup:
+
+```sh
+python -m app.ingest
+```
+
+This parses and chunks the documents listed in `DOC_PATHS`, computes embeddings, and stores them in your configured vector database (Milvus or disk-backed FAISS). Subsequent application starts connect to this index instantly without recomputing embeddings.
+
+### 5. Start the server
 
 ```powershell
 python -m uvicorn main:app --host 0.0.0.0 --port 8000
@@ -73,6 +83,101 @@ Sugar-AI reads the active configuration from `.env`. The model is selected in th
 `AI_PROVIDER` must match the model service being used. The template uses `huggingface`. For Ollama, OpenAI-compatible services, or Gemini, uncomment and configure the corresponding provider settings in `.env`.
 
 The application fails during startup when no model is configured. This gives a clear configuration error instead of passing an empty model name to a provider.
+
+## Persistent Vector Storage and Ingestion (Milvus & FAISS)
+
+Sugar-AI supports persistent, incremental document retrieval to avoid rebuilding vector indexes on every application restart. Document ingestion is separated from application startup: documents are parsed, chunked, and embedded once via the ingestion tool, and the application loads the pre-indexed collection at startup in milliseconds.
+
+### Architecture Overview
+
+- **Production Backend (Milvus)**: Scalable, persistent vector database supporting millions of chunks, rich metadata storage, and dynamic collection loading. Suitable for multi-container deployments and cloud environments.
+- **Development Fallback (FAISS)**: Lightweight, disk-backed FAISS vector store with automated SHA-256 integrity verification on index files, ideal for local development without external dependencies.
+- **Incremental Sync**: The ingestion tool calculates content and document hashes, skipping unchanged documents and only computing embeddings for new or modified text chunks.
+
+### Configuration
+
+Configure the vector storage backend in `.env`:
+
+```env
+# Vector store backend selection ("milvus" or "faiss")
+VECTOR_STORE_BACKEND=milvus
+
+# Milvus configuration
+# For Docker standalone: http://localhost:19530
+# For embedded Milvus Lite: ./data/milvus.db
+# For remote/cloud instances: https://<endpoint>
+MILVUS_URI=http://localhost:19530
+MILVUS_COLLECTION_NAME=sugar_ai_docs
+# MILVUS_TOKEN=
+# MILVUS_USER=
+# MILVUS_PASSWORD=
+# MILVUS_METRIC_TYPE=COSINE
+
+# Local persistent storage path (used by FAISS backend)
+VECTOR_STORE_PATH=./data/vectorstore
+
+# Document chunking settings
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=150
+```
+
+### Document Ingestion Commands
+
+Run ingestion from the repository root:
+
+- **Initial / Incremental Ingestion**:
+  ```sh
+  python -m app.ingest
+  ```
+  Only new and modified files are embedded; unchanged files are skipped with zero re-embeddings.
+
+- **Force Full Reindex**:
+  ```sh
+  python -m app.ingest --reindex
+  ```
+  Clears the existing collection and re-indexes all documents from scratch.
+
+- **Dry-run (Check Pending Changes)**:
+  ```sh
+  python -m app.ingest --dry-run
+  ```
+  Inspects what files would be added, updated, or deleted without modifying the vector store.
+
+- **Index Custom File Paths**:
+  ```sh
+  python -m app.ingest --paths "docs/Pygame Documentation.pdf" "docs/custom_guide.txt"
+  ```
+
+- **Backend Override**:
+  ```sh
+  python -m app.ingest --backend faiss
+  ```
+
+### Starting Milvus Standalone with Docker Compose
+
+To spin up a local Milvus standalone instance using Docker Compose:
+
+```sh
+docker compose up -d milvus
+```
+
+Verify Milvus health:
+
+```sh
+curl http://localhost:9091/healthz
+```
+
+Once running, ingest the documents:
+
+```sh
+python -m app.ingest
+```
+
+And start Sugar-AI:
+
+```sh
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
 
 ## Running Sugar-AI with Docker
 
@@ -568,7 +673,7 @@ Remove the `--quantize` flag if you prefer running without 4‑bit quantization.
      
 2. **Document Retrieval:**
      - Place your documents (PDF or text files) in the directory specified in the default parameters or provide your paths using the `--docs` flag.
-     - The vector store is rebuilt every time the agent starts. Ensure your documents are well placed to retrieve relevant content.
+     - The vector store is persistent across restarts. Run `python -m app.ingest` whenever you add or modify documentation files.
 
 3. **Question Handling:**
      - After the agent starts, enter a sample coding-related question.

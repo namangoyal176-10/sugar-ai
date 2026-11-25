@@ -33,6 +33,30 @@ class Settings(BaseSettings):
     DOC_PATHS: List[str] = Field(default_factory=list)
     MAX_DAILY_REQUESTS: int = 100
 
+    # Vector store configuration
+    # Options: "milvus" (persistent production/scalable) or "faiss" (local development fallback)
+    VECTOR_STORE_BACKEND: str = "milvus"
+    EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
+    EMBEDDING_DIMENSION: int = 384
+
+    # Milvus connection settings
+    MILVUS_URI: str = "http://localhost:19530"
+    MILVUS_COLLECTION_NAME: str = "sugar_ai_docs"
+    MILVUS_TOKEN: Optional[str] = None
+    MILVUS_USER: Optional[str] = None
+    MILVUS_PASSWORD: Optional[str] = None
+    MILVUS_DB_NAME: str = "default"
+    MILVUS_METRIC_TYPE: str = "COSINE"
+    MILVUS_INDEX_TYPE: str = "AUTOINDEX"
+
+    # Local persistent storage path (used by FAISS or file-backed storage)
+    VECTOR_STORE_PATH: str = "./data/vectorstore"
+    FAISS_INDEX_PATH: Optional[str] = None
+
+    # Chunking configuration for document ingestion
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 150
+
     # Reasoning shares the output token budget with the answer. When think is on,
     # add this many tokens on top of the caller's max_length so reasoning cannot
     # starve the answer to empty. Tune per model (larger models need less).
